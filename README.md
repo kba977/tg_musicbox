@@ -20,6 +20,9 @@
 ### 发送成功
 ![发送成功](./images/music_box_4.png)  
 
+### Heroku 日志
+![Heroku 日志](./images/heroku_log.png)
+
 
 
 ## 部署到Heroku
