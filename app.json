@@ -1,0 +1,7 @@
+{
+    "name": "MusicBox",
+    "description": "Telegram Music Box",
+    "image": "heroku/python",
+    "repository": "{部署代码的仓库地址}",
+    "keywords": ["python"]
+}
