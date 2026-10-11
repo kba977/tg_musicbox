@@ -128,3 +128,4 @@ dmypy.json
 # musicbox
 data/
 .ruff_cache/
+docker-compose.override.yml

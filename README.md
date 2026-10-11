@@ -57,6 +57,27 @@ docker compose logs -f      # 看到「网易云连通性检查通过」即可
 >
 > 同一个 token 只能有一个实例在 polling，不要同时在本地和服务器上运行。
 
+### 用家里的电脑做网易云代理（免费）
+
+VPS 在海外时，可以用一台常开、能正常访问网易云的电脑，通过 SSH 反向隧道在 VPS 上开一个 SOCKS5 代理：
+
+```bash
+# 在家里的电脑上运行（建议用 launchd / systemd 常驻，断线自动重连）
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -R 127.0.0.1:1080 <vps>
+```
+
+VPS 上的配置：
+
+```bash
+echo 'NETEASE_PROXY=socks5://127.0.0.1:1080' >> .env
+cat > docker-compose.override.yml <<'EOF'
+services:
+  musicbox:
+    network_mode: host   # 容器才能访问宿主机 127.0.0.1 上的隧道端口
+EOF
+docker compose up -d --force-recreate
+```
+
 ## 项目结构
 
 ```
