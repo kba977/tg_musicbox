@@ -23,6 +23,8 @@ class Settings:
     cache_db: Path = Path('data/cache.db')
     max_downloads: int = 5
     log_level: str = 'INFO'
+    # 被拒绝时提示的联系方式，例如 @someone；不填则自动使用第一个管理员的用户名
+    admin_contact: str | None = None
     access: Access = field(default_factory=Access)
 
     @classmethod
@@ -35,6 +37,7 @@ class Settings:
                    cache_db=Path(os.environ.get('CACHE_DB', cls.cache_db)),
                    max_downloads=int(os.environ.get('MAX_DOWNLOADS', cls.max_downloads)),
                    log_level=os.environ.get('LOG_LEVEL', cls.log_level).upper(),
+                   admin_contact=os.environ.get('ADMIN_CONTACT', '').strip() or None,
                    access=Access(public=parse_bool('PUBLIC_ACCESS'),
                                  users=parse_ids('ALLOWED_USERS'),
                                  chats=parse_ids('ALLOWED_CHATS'),

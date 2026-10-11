@@ -397,3 +397,19 @@ async def test_allowlist(netease):
     text = log[-1][1]
     assert '私有' in text and '<b>用户</b>：<code>7</code>' in text
     assert '<b>用户（.env）</b>：<code>42</code>' in text and '<b>群</b>：<code>-1009</code>' in text
+
+
+async def test_denial_mentions_admin_contact(netease):
+    bot = private_bot(netease)
+    bot.admin_contact = '@SanaeKochiya'
+    log = []
+    await on_text(bot, text_update(log, '我想听晴天', user_id=7))
+    await on_text(bot, text_update(log, '我想听晴天', chat=ChatType.GROUP, chat_id=-1009))
+    assert '请把你的用户 ID 发给 @SanaeKochiya ：<code>7</code>' in log[0][1]
+    assert '请联系 @SanaeKochiya 开通' in log[1][1] and '<code>-1009</code>' in log[1][1]
+
+
+async def test_denial_without_contact(netease):
+    log = []
+    await on_text(private_bot(netease), text_update(log, '我想听晴天', user_id=7))
+    assert '发给管理员：<code>7</code>' in log[0][1]

@@ -48,8 +48,9 @@ HELP_TEXT = (
     '<i>注：🔒 标记的是 VIP / 付费歌曲，通常无法下载，会返回歌词</i>'
 )
 UNAVAILABLE = '该歌曲由于版权或者其他原因无法下载'
-DENIED_PRIVATE = '🔒 这是一个私人 bot，暂不对外开放\n\n你的用户 ID：<code>{id}</code>，可以发给管理员申请开通'
-DENIED_GROUP = '🔒 本群未开通，群 ID：<code>{id}</code>'
+DENIED_PRIVATE = ('🔒 这是一个私人 bot，暂不对外开放\n\n'
+                  '如需开通，请把你的用户 ID 发给{contact}：<code>{id}</code>')
+DENIED_GROUP = '🔒 本群未开通，请联系{contact}开通\n群 ID：<code>{id}</code>'
 ADMIN_ONLY = '⛔ 仅管理员可以使用该命令'
 ADMIN_HELP = (
     '<b>白名单管理</b>\n'
@@ -103,6 +104,7 @@ class MusicBot:
         self.netease = netease
         self.cache = cache
         self.access = access
+        self.admin_contact: str | None = None   # 如 @someone，启动时设置
         self.download_slots = asyncio.Semaphore(max_downloads)
         self.song_lock = KeyedLock()    # 同一首歌并发请求时排队，第一个上传后其余走缓存
         self.user_slot = BusySet()      # 每个人同一时间只处理一个请求，防止刷屏
@@ -201,6 +203,9 @@ class MusicBot:
 
     # ---------- Telegram handlers ----------
 
+    def _contact(self) -> str:
+        return f' {html.escape(self.admin_contact)} ' if self.admin_contact else '管理员'
+
     async def _check_access(self, update: Update) -> bool:
         """没有权限时回复提示（附上 ID，方便加入白名单）并返回 False"""
         user, chat = update.effective_user, update.effective_chat
@@ -211,12 +216,11 @@ class MusicBot:
                     user and user.id, user and user.username, chat and chat.id, chat and chat.type)
         if update.callback_query:
             await update.callback_query.answer('🔒 你没有使用权限', show_alert=True)
-        elif chat.type == ChatType.PRIVATE:
-            await update.effective_message.reply_text(DENIED_PRIVATE.format(id=user.id),
-                                                      parse_mode=ParseMode.HTML)
         else:
-            await update.effective_message.reply_text(DENIED_GROUP.format(id=chat.id),
-                                                      parse_mode=ParseMode.HTML)
+            private = chat.type == ChatType.PRIVATE
+            text = (DENIED_PRIVATE if private else DENIED_GROUP).format(id=user.id if private else chat.id,
+                                                                        contact=self._contact())
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
         return False
 
     async def handle_request(self, update: Update, keywords: str):
@@ -363,6 +367,18 @@ class MusicBot:
         logger.error('Exception while handling an update:', exc_info=context.error)
 
 
+async def find_admin_contact(app: Application, admins: frozenset[int]) -> str | None:
+    """用第一个有用户名的管理员作为联系方式"""
+    for admin in sorted(admins):
+        try:
+            chat = await app.bot.get_chat(admin)
+        except TelegramError:
+            continue
+        if chat.username:
+            return f'@{chat.username}'
+    return None
+
+
 def build_application(settings: Settings) -> Application:
     netease = NeteaseClient(proxy=settings.netease_proxy)
     cache = FileIdCache(settings.cache_db)
@@ -372,6 +388,8 @@ def build_application(settings: Settings) -> Application:
     async def post_init(app: Application):
         await app.bot.set_my_commands(USER_COMMANDS)
         # 管理员命令只在管理员的私聊命令菜单里显示
+        bot.admin_contact = settings.admin_contact or await find_admin_contact(app, settings.access.admins)
+        logger.info('管理员联系方式：%s', bot.admin_contact or '未知')
         for admin in settings.access.admins:
             try:
                 await app.bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(admin))
