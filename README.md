@@ -1,63 +1,76 @@
 # Telegram 音乐盒子
-在Telegram上搜索并下载某易云音乐
 
+在 Telegram 上搜索并下载网易云音乐。
 
-## 效果展示
+## 使用
+
+私聊或群聊里发送 `我想听歌名` 或 `/music 歌名`（群聊里也可以 `@bot 歌名`）：
+
+1. bot 列出最多 8 首候选歌曲，🔒 标记的是 VIP / 付费歌曲；
+2. 点击按钮选择后开始下载（私聊会显示进度条），发送带封面、歌词的 mp3；
+3. 无法下载的歌曲会提示原因并附上歌词。
+
+> 群聊里想直接用「我想听xxx」，需要在 @BotFather 中 `/setprivacy` → `Disable` 关闭隐私模式，然后把 bot 重新拉进群；否则只能用 `/music` 或 `@bot`。
 
 ![效果展示](./images/music_box_0.png)
 
-在发出我想听XXX(歌曲名)后，bot返回的对话框状态由 搜索中 -> 下载中 -> 发送中 -> 歌曲 自动转换
+## 特性
 
-### 搜索中
-![搜索中](./images/music_box_1.png)  
+- 直接调用网易云官方接口，不依赖第三方音乐 API
+- 同一首歌只下载上传一次，之后用 Telegram file_id 秒发（缓存存在 SQLite，重启不丢）
+- 多人同时点同一首歌时合并为一次下载；限制同时下载数；每人同一时间只处理一个请求
+- 自动遵守 Telegram 发消息频率限制，超限时排队重试
+- 启动时自检网易云连通性，发现地区限制会在日志里提示，可通过 `NETEASE_PROXY` 配置代理
 
-### 下载中
-![下载中](./images/music_box_2.png)  
+## 本地运行
 
-### 发送中
-![发送中](./images/music_box_3.png)  
+需要 [uv](https://docs.astral.sh/uv/)：
 
-### 发送成功
-![发送成功](./images/music_box_4.png)  
+```bash
+cp .env.example .env        # 填入 TG_BOT_TOKEN
+uv sync
+uv run --env-file .env python -m musicbox
+```
 
-### Heroku 日志
-![Heroku 日志](./images/heroku_log.png)
+运行测试：
 
+```bash
+uv run pytest                        # 单元测试
+NETEASE_LIVE=1 uv run pytest -m live # 访问真实网易云接口的连通性测试
+uv run ruff check .
+```
 
+## 部署（Docker）
 
-## 部署到Heroku
+任意能跑 Docker 的 VPS 都可以，使用 polling 模式，不需要域名和 HTTPS：
 
-1. 第一步，根据[此项目](https://github.com/Binaryify/NeteaseCloudMusicApi)建立音乐API 并部署到 `heroku`；
-2. 将代码中相应地方的变量替换掉，如 机器人 `Token`，上一步中音乐API的地址等；
-3. 修改之后即可将本项目一同部署到 `heroku`，即可。
+```bash
+git clone https://github.com/kba977/tg_musicbox.git && cd tg_musicbox
+cp .env.example .env        # 填入 TG_BOT_TOKEN
+docker compose up -d --build
+docker compose logs -f      # 看到「网易云连通性检查通过」即可
+```
 
+更新：`git pull && docker compose up -d --build`
 
+> 网易云对海外 IP 有地区限制。如果日志提示「当前 IP 可能被限制地区」，在 `.env` 里配置 `NETEASE_PROXY` 指向一个香港或国内的代理。
+>
+> 同一个 token 只能有一个实例在 polling，不要同时在本地和服务器上运行。
 
-## 参考
+## 项目结构
 
-1. 怎么部署网易云音乐API?  
-   https://www.bilibili.com/video/av27407777
+```
+musicbox/
+├── __main__.py   # 入口：python -m musicbox
+├── config.py     # 从环境变量读取配置
+├── netease.py    # 网易云客户端：搜索、详情、歌词、下载
+├── cache.py      # file_id 缓存（SQLite）、并发锁
+└── bot.py        # Telegram 交互：点歌、选歌按钮、发送
+tests/            # pytest 测试
+```
 
-2. 那些地方需要替换掉？
+## 限制
 
-   `TOKEN`: 这里替换成 bot 的 TOKEN
-   
-	![1](./images/1.png)
-   
-   即第一步中网易云音乐 API 的地址
-   
-   ![1](./images/2.png)
-   
-    这里填写 heroku create 之后生成的 app 的地址。eg: `https://app-name.herokuapp.com/`
-   
-   ![1](./images/3.png)
-   
-     这里填写 heroku create 之后生成的 app 的仓库地址 eg: `https://git.heroku.com/app-name.git`![1](./images/4.png)
-
-3. 怎么将项目部署到 heroku？
-
-   文档: https://devcenter.heroku.com/articles/getting-started-with-python
-
-   
-
-   
+- 只有免费歌曲能下载，VIP / 付费 / 无版权的歌曲只能返回歌词
+- Telegram 限制 bot 在同一个群每分钟约 20 条消息，高峰时点歌需要排队
+- bot 上传文件上限 50MB

@@ -1,0 +1,16 @@
+services:
+  musicbox:
+    build: .
+    image: tg-musicbox
+    env_file: .env
+    volumes:
+      - musicbox-data:/app/data   # file_id 缓存，重建容器后保留
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  musicbox-data:

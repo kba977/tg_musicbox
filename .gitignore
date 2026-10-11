@@ -124,3 +124,7 @@ dmypy.json
 .venv/
 
 # End of https://www.gitignore.io/api/python
+
+# musicbox
+data/
+.ruff_cache/
