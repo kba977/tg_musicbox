@@ -20,11 +20,22 @@
 
 | 配置 | 说明 |
 |---|---|
-| `PUBLIC_ACCESS` | `false`（默认）仅白名单可用；`true` 所有人可用 |
+| `PUBLIC_ACCESS` | `false`（默认）仅管理员和白名单可用；`true` 所有人可用 |
+| `ADMIN_USERS` | 逗号分隔的管理员用户 ID，始终可用，并能用命令管理白名单 |
 | `ALLOWED_USERS` | 逗号分隔的用户 ID，这些人在私聊和任何群里都能用 |
 | `ALLOWED_CHATS` | 逗号分隔的群 ID，群里所有人都能用 |
 
-不在白名单的人私聊 bot 时会收到自己的用户 ID，在群里点歌时会收到群 ID，把 ID 填进 `.env` 后重启即可。
+不在白名单的人私聊 bot 时会收到自己的用户 ID，在群里点歌时会收到群 ID。
+
+管理员可以直接在 Telegram 里管理白名单（保存在 SQLite，重启不丢；`.env` 里配置的不能用命令删除）：
+
+| 命令 | 说明 |
+|---|---|
+| `/allow 123456` | 按 ID 加入白名单，正数为用户、负数为群 |
+| 回复某人的消息 + `/allow` | 把这个人加入白名单 |
+| 在群里发 `/allow` | 开通当前群 |
+| `/deny ...` | 移出白名单，用法同 `/allow` |
+| `/allowlist` | 查看当前白名单 |
 
 ## 特性
 
@@ -97,6 +108,7 @@ musicbox/
 ├── __main__.py   # 入口：python -m musicbox
 ├── config.py     # 从环境变量读取配置
 ├── netease.py    # 网易云客户端：搜索、详情、歌词、下载
+├── access.py     # 访问控制、白名单（SQLite）
 ├── cache.py      # file_id 缓存（SQLite）、并发锁
 └── bot.py        # Telegram 交互：点歌、选歌按钮、发送
 tests/            # pytest 测试

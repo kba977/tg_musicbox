@@ -5,6 +5,7 @@ from types import SimpleNamespace as NS
 import pytest
 from telegram.constants import ChatType
 
+from musicbox.access import AccessControl, AllowStore
 from musicbox.bot import MusicBot, build_choices, extract_keywords
 from musicbox.cache import FileIdCache
 from musicbox.config import Access
@@ -84,6 +85,10 @@ class FakeQuery:
         self.answers.append(text)
 
 
+def make_access(**config):
+    return AccessControl(Access(**config), AllowStore(':memory:'))
+
+
 @pytest.fixture
 def netease():
     return FakeNetease([FREE, VIP])
@@ -91,7 +96,7 @@ def netease():
 
 @pytest.fixture
 def bot(netease):
-    return MusicBot(netease, FileIdCache(':memory:'), Access(public=True), max_downloads=2)
+    return MusicBot(netease, FileIdCache(':memory:'), make_access(public=True), max_downloads=2)
 
 
 def update_for(message, user_id=42):
@@ -231,7 +236,7 @@ async def test_progress_only_in_private_chat(bot):
 # ---------- 访问控制 ----------
 
 def private_bot(netease, **access):
-    return MusicBot(netease, FileIdCache(':memory:'), Access(**access))
+    return MusicBot(netease, FileIdCache(':memory:'), make_access(**access))
 
 
 def text_update(log, text, chat=ChatType.PRIVATE, user_id=42, chat_id=None):
@@ -290,3 +295,105 @@ async def test_private_bot_denies_callback(netease):
                 effective_chat=NS(type=ChatType.GROUP, id=-100))
     await private_bot(netease).on_choice(update, None)
     assert '没有使用权限' in query.answers[0] and log == []
+
+
+# ---------- 白名单管理命令 ----------
+
+ADMIN = 1
+
+
+def command_update(log, user_id=ADMIN, chat=ChatType.PRIVATE, chat_id=None, reply_to=None):
+    chat_id = chat_id if chat_id is not None else user_id
+    message = FakeMessage(log, chat=chat, chat_id=chat_id, reply_to=reply_to)
+    message.chat.title = '音乐群'
+    return update_for(message, user_id)
+
+
+async def run_command(handler, update, *args):
+    await handler(update, NS(args=list(args)))
+
+
+async def can_use(bot, user_id, chat=ChatType.PRIVATE, chat_id=None):
+    log = []
+    await on_text(bot, text_update(log, '我想听晴天', chat=chat, user_id=user_id, chat_id=chat_id))
+    return '搜索中' in log[0][1]
+
+
+async def test_admin_commands_reject_non_admin(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}), users=frozenset({42}))
+    for handler in (bot.on_allow, bot.on_deny, bot.on_allowlist):
+        log = []
+        await run_command(handler, command_update(log, user_id=42), '7')
+        assert '仅管理员' in log[0][1]
+    assert not await can_use(bot, 7)
+
+
+async def test_admin_is_always_allowed(netease):
+    assert await can_use(private_bot(netease, admins=frozenset({ADMIN})), ADMIN)
+
+
+async def test_allow_and_deny_user_by_id(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}))
+    log = []
+    await run_command(bot.on_allow, command_update(log), '7')
+    assert '已将用户 <code>7</code>加入白名单' in log[-1][1]
+    assert await can_use(bot, 7)
+
+    await run_command(bot.on_allow, command_update(log), '7')
+    assert '已经在白名单中' in log[-1][1]
+
+    await run_command(bot.on_deny, command_update(log), '7')
+    assert '移出白名单' in log[-1][1]
+    assert not await can_use(bot, 7)
+
+    await run_command(bot.on_deny, command_update(log), '7')
+    assert '不在白名单中' in log[-1][1]
+
+
+async def test_allow_current_group(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}))
+    log = []
+    await run_command(bot.on_allow, command_update(log, chat=ChatType.SUPERGROUP, chat_id=-1009))
+    assert '本群 音乐群（<code>-1009</code>）' in log[-1][1]
+    assert await can_use(bot, 7, chat=ChatType.SUPERGROUP, chat_id=-1009)
+    assert not await can_use(bot, 7)   # 只开通了这个群，私聊仍不可用
+
+
+async def test_allow_replied_user(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}))
+    log = []
+    replied = FakeMessage(log)
+    replied.from_user = NS(id=7, is_bot=False, full_name='小明')
+    await run_command(bot.on_allow, command_update(log, chat=ChatType.GROUP, chat_id=-1009, reply_to=replied))
+    assert '用户 小明（<code>7</code>）' in log[-1][1]
+    assert await can_use(bot, 7)
+    assert not await can_use(bot, 8, chat=ChatType.GROUP, chat_id=-1009)
+
+
+async def test_allow_without_target_in_private_shows_usage(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}))
+    for args in ((), ('abc',)):
+        log = []
+        await run_command(bot.on_allow, command_update(log), *args)
+        assert '白名单管理' in log[0][1]
+
+
+async def test_deny_static_and_admin(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}), users=frozenset({42}))
+    log = []
+    await run_command(bot.on_deny, command_update(log), '42')
+    assert '.env 中配置' in log[-1][1]
+    await run_command(bot.on_deny, command_update(log), str(ADMIN))
+    assert '是管理员' in log[-1][1]
+    assert await can_use(bot, 42)
+
+
+async def test_allowlist(netease):
+    bot = private_bot(netease, admins=frozenset({ADMIN}), users=frozenset({42}))
+    log = []
+    await run_command(bot.on_allow, command_update(log), '7')
+    await run_command(bot.on_allow, command_update(log), '-1009')
+    await run_command(bot.on_allowlist, command_update(log))
+    text = log[-1][1]
+    assert '私有' in text and '<b>用户</b>：<code>7</code>' in text
+    assert '<b>用户（.env）</b>：<code>42</code>' in text and '<b>群</b>：<code>-1009</code>' in text

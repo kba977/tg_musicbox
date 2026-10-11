@@ -6,9 +6,16 @@ import logging
 import re
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, Update
+from telegram import (
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    Message,
+    Update,
+)
 from telegram.constants import ChatType, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -19,8 +26,9 @@ from telegram.ext import (
     filters,
 )
 
+from .access import AccessControl, AllowStore, ChangeResult, Kind
 from .cache import BusySet, FileIdCache, KeyedLock
-from .config import Access, Settings
+from .config import Settings
 from .netease import DownloadError, Music, NeteaseClient
 
 logger = logging.getLogger(__name__)
@@ -40,8 +48,19 @@ HELP_TEXT = (
     '<i>注：🔒 标记的是 VIP / 付费歌曲，通常无法下载，会返回歌词</i>'
 )
 UNAVAILABLE = '该歌曲由于版权或者其他原因无法下载'
-DENIED_PRIVATE = '🔒 这是一个私人 bot，暂不对外开放\n\n你的用户 ID：<code>{id}</code>'
+DENIED_PRIVATE = '🔒 这是一个私人 bot，暂不对外开放\n\n你的用户 ID：<code>{id}</code>，可以发给管理员申请开通'
 DENIED_GROUP = '🔒 本群未开通，群 ID：<code>{id}</code>'
+ADMIN_ONLY = '⛔ 仅管理员可以使用该命令'
+ADMIN_HELP = (
+    '<b>白名单管理</b>\n'
+    '/allow <code>ID</code> - 加入白名单（正数为用户，负数为群）\n'
+    '/deny <code>ID</code> - 移出白名单\n'
+    '/allowlist - 查看白名单\n\n'
+    '也可以回复某人的消息发送 /allow，或在群里直接发送 /allow 开通本群'
+)
+USER_COMMANDS = [('music', '搜索并下载歌曲，例如 /music 晴天'), ('help', '使用说明')]
+ADMIN_COMMANDS = USER_COMMANDS + [('allow', '加入白名单'), ('deny', '移出白名单'),
+                                  ('allowlist', '查看白名单')]
 
 
 def extract_keywords(message: Message, bot_username: str) -> str | None:
@@ -68,6 +87,10 @@ def build_choices(musics: list[Music], user_id: int) -> tuple[str, InlineKeyboar
     return '找到以下歌曲，请选择：\n\n' + '\n'.join(lines), InlineKeyboardMarkup(buttons)
 
 
+def format_ids(ids: list[int]) -> str:
+    return '、'.join(f'<code>{i}</code>' for i in ids) or '无'
+
+
 def progress_text(music: Music, received: int, total: int) -> str:
     done = PROGRESS_WIDTH * received // total
     bar = '█' * done + '.' * (PROGRESS_WIDTH - done)
@@ -75,7 +98,8 @@ def progress_text(music: Music, received: int, total: int) -> str:
 
 
 class MusicBot:
-    def __init__(self, netease: NeteaseClient, cache: FileIdCache, access: Access, max_downloads: int = 5):
+    def __init__(self, netease: NeteaseClient, cache: FileIdCache, access: AccessControl,
+                 max_downloads: int = 5):
         self.netease = netease
         self.cache = cache
         self.access = access
@@ -258,6 +282,82 @@ class MusicBot:
             await status.edit_text(f'{html.escape(music.title)}, 下载中....', parse_mode=ParseMode.HTML)
             await self.download_music(status, music)
 
+    # ---------- 白名单管理（仅管理员） ----------
+
+    async def _check_admin(self, update: Update) -> bool:
+        if self.access.is_admin(update.effective_user.id):
+            return True
+        await update.effective_message.reply_text(ADMIN_ONLY)
+        return False
+
+    async def _resolve_target(self, update: Update, args: list[str]) -> tuple[int, str] | None:
+        """命令的目标：参数里的 ID > 被回复的人 > 当前群；返回 (ID, 描述)"""
+        message, chat = update.effective_message, update.effective_chat
+        if args:
+            try:
+                target = int(args[0])
+            except ValueError:
+                await message.reply_text(ADMIN_HELP, parse_mode=ParseMode.HTML)
+                return None
+            kind = '用户' if Kind.of(target) == Kind.USER else '群'
+            return target, f'{kind} <code>{target}</code>'
+
+        replied = message.reply_to_message
+        if replied and replied.from_user and not replied.from_user.is_bot:
+            user = replied.from_user
+            return user.id, f'用户 {html.escape(user.full_name)}（<code>{user.id}</code>）'
+        if chat.type != ChatType.PRIVATE:
+            return chat.id, f'本群 {html.escape(chat.title or "")}（<code>{chat.id}</code>）'
+
+        await message.reply_text(ADMIN_HELP, parse_mode=ParseMode.HTML)
+        return None
+
+    async def on_allow(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_admin(update):
+            return
+        target = await self._resolve_target(update, context.args)
+        if not target:
+            return
+        target_id, label = target
+        if self.access.add(target_id, update.effective_user.id) == ChangeResult.DONE:
+            logger.info('allowlist add %s by %s', target_id, update.effective_user.id)
+            text = f'✅ 已将{label}加入白名单'
+        else:
+            text = f'{label} 已经在白名单中'
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def on_deny(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_admin(update):
+            return
+        target = await self._resolve_target(update, context.args)
+        if not target:
+            return
+        target_id, label = target
+        if self.access.is_admin(target_id):
+            await update.effective_message.reply_text(f'{label} 是管理员，始终可以使用',
+                                                      parse_mode=ParseMode.HTML)
+            return
+        result = self.access.remove(target_id)
+        if result == ChangeResult.DONE:
+            logger.info('allowlist remove %s by %s', target_id, update.effective_user.id)
+        text = {ChangeResult.DONE: f'🚫 已将{label}移出白名单',
+                ChangeResult.UNCHANGED: f'{label} 不在白名单中',
+                ChangeResult.STATIC: f'{label} 是在 .env 中配置的，需要修改 .env 后重启'}[result]
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def on_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._check_admin(update):
+            return
+        config = self.access.config
+        lines = [f'<b>访问模式</b>：{"公开，所有人可用" if config.public else "私有，仅白名单可用"}',
+                 f'<b>管理员</b>：{format_ids(sorted(config.admins))}']
+        for kind, (static, dynamic) in self.access.listing().items():
+            name = '用户' if kind == Kind.USER else '群'
+            lines.append(f'<b>{name}</b>：{format_ids(dynamic)}')
+            if static:
+                lines.append(f'<b>{name}（.env）</b>：{format_ids(static)}')
+        await update.effective_message.reply_text('\n'.join(lines), parse_mode=ParseMode.HTML)
+
     @staticmethod
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         logger.error('Exception while handling an update:', exc_info=context.error)
@@ -266,23 +366,34 @@ class MusicBot:
 def build_application(settings: Settings) -> Application:
     netease = NeteaseClient(proxy=settings.netease_proxy)
     cache = FileIdCache(settings.cache_db)
-    bot = MusicBot(netease, cache, settings.access, settings.max_downloads)
+    allow_store = AllowStore(settings.cache_db)
+    bot = MusicBot(netease, cache, AccessControl(settings.access, allow_store), settings.max_downloads)
 
     async def post_init(app: Application):
-        await app.bot.set_my_commands([('music', '搜索并下载歌曲，例如 /music 晴天'),
-                                       ('help', '使用说明')])
-        access = settings.access
-        if access.public:
+        await app.bot.set_my_commands(USER_COMMANDS)
+        # 管理员命令只在管理员的私聊命令菜单里显示
+        for admin in settings.access.admins:
+            try:
+                await app.bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(admin))
+            except TelegramError:
+                logger.warning('无法为管理员 %s 设置命令菜单（需要先私聊 bot 一次）', admin)
+
+        listing = bot.access.listing()
+        users = sum(len(ids) for ids in listing[Kind.USER])
+        chats = sum(len(ids) for ids in listing[Kind.CHAT])
+        if settings.access.public:
             logger.info('访问模式：公开，所有人可用')
         else:
-            logger.info('访问模式：私有，白名单用户 %d 个、群 %d 个', len(access.users), len(access.chats))
-            if not access.users and not access.chats:
-                logger.warning('白名单为空，没有人能使用 bot。私聊 bot 获取你的用户 ID，填入 ALLOWED_USERS')
+            logger.info('访问模式：私有，管理员 %d 个、白名单用户 %d 个、群 %d 个',
+                        len(settings.access.admins), users, chats)
+        if not settings.access.admins:
+            logger.warning('未配置 ADMIN_USERS，无法用命令管理白名单。私聊 bot 获取你的用户 ID 后填入')
         await netease.check_connectivity()
 
     async def post_shutdown(app: Application):
         await netease.aclose()
         cache.close()
+        allow_store.close()
 
     app = (Application.builder()
            .token(settings.token)
@@ -293,6 +404,9 @@ def build_application(settings: Settings) -> Application:
            .build())
     app.add_handler(CommandHandler(['start', 'help'], bot.on_help))
     app.add_handler(CommandHandler('music', bot.on_music_command))
+    app.add_handler(CommandHandler('allow', bot.on_allow))
+    app.add_handler(CommandHandler('deny', bot.on_deny))
+    app.add_handler(CommandHandler('allowlist', bot.on_allowlist))
     app.add_handler(CallbackQueryHandler(bot.on_choice, pattern=r'^(pick|cancel):'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.on_text))
     app.add_error_handler(bot.on_error)

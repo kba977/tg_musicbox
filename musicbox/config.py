@@ -5,10 +5,11 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Access:
-    """谁能使用 bot：公开时所有人可用，否则只有白名单里的用户 / 群"""
+    """.env 里配置的访问规则：公开时所有人可用，否则只有白名单里的用户 / 群"""
     public: bool = False
     users: frozenset[int] = frozenset()
     chats: frozenset[int] = frozenset()
+    admins: frozenset[int] = frozenset()   # 可以用 /allow /deny 管理白名单
 
     def allows(self, user_id: int | None, chat_id: int | None) -> bool:
         return self.public or user_id in self.users or chat_id in self.chats
@@ -36,7 +37,8 @@ class Settings:
                    log_level=os.environ.get('LOG_LEVEL', cls.log_level).upper(),
                    access=Access(public=parse_bool('PUBLIC_ACCESS'),
                                  users=parse_ids('ALLOWED_USERS'),
-                                 chats=parse_ids('ALLOWED_CHATS')))
+                                 chats=parse_ids('ALLOWED_CHATS'),
+                                 admins=parse_ids('ADMIN_USERS')))
 
 
 def parse_bool(name: str, default: bool = False) -> bool:
