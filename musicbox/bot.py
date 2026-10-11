@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 from .cache import BusySet, FileIdCache, KeyedLock
-from .config import Settings
+from .config import Access, Settings
 from .netease import DownloadError, Music, NeteaseClient
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,8 @@ HELP_TEXT = (
     '<i>注：🔒 标记的是 VIP / 付费歌曲，通常无法下载，会返回歌词</i>'
 )
 UNAVAILABLE = '该歌曲由于版权或者其他原因无法下载'
+DENIED_PRIVATE = '🔒 这是一个私人 bot，暂不对外开放\n\n你的用户 ID：<code>{id}</code>'
+DENIED_GROUP = '🔒 本群未开通，群 ID：<code>{id}</code>'
 
 
 def extract_keywords(message: Message, bot_username: str) -> str | None:
@@ -73,9 +75,10 @@ def progress_text(music: Music, received: int, total: int) -> str:
 
 
 class MusicBot:
-    def __init__(self, netease: NeteaseClient, cache: FileIdCache, max_downloads: int = 5):
+    def __init__(self, netease: NeteaseClient, cache: FileIdCache, access: Access, max_downloads: int = 5):
         self.netease = netease
         self.cache = cache
+        self.access = access
         self.download_slots = asyncio.Semaphore(max_downloads)
         self.song_lock = KeyedLock()    # 同一首歌并发请求时排队，第一个上传后其余走缓存
         self.user_slot = BusySet()      # 每个人同一时间只处理一个请求，防止刷屏
@@ -174,6 +177,24 @@ class MusicBot:
 
     # ---------- Telegram handlers ----------
 
+    async def _check_access(self, update: Update) -> bool:
+        """没有权限时回复提示（附上 ID，方便加入白名单）并返回 False"""
+        user, chat = update.effective_user, update.effective_chat
+        if self.access.allows(user.id if user else None, chat.id if chat else None):
+            return True
+
+        logger.info('access denied: user=%s (@%s) chat=%s (%s)',
+                    user and user.id, user and user.username, chat and chat.id, chat and chat.type)
+        if update.callback_query:
+            await update.callback_query.answer('🔒 你没有使用权限', show_alert=True)
+        elif chat.type == ChatType.PRIVATE:
+            await update.effective_message.reply_text(DENIED_PRIVATE.format(id=user.id),
+                                                      parse_mode=ParseMode.HTML)
+        else:
+            await update.effective_message.reply_text(DENIED_GROUP.format(id=chat.id),
+                                                      parse_mode=ParseMode.HTML)
+        return False
+
     async def handle_request(self, update: Update, keywords: str):
         message = update.effective_message
         if not keywords:
@@ -188,19 +209,27 @@ class MusicBot:
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keywords = extract_keywords(update.effective_message, context.bot.username)
-        if keywords is not None:
-            await self.handle_request(update, keywords)
-        elif update.effective_chat.type == ChatType.PRIVATE:
+        if keywords is None and update.effective_chat.type != ChatType.PRIVATE:
+            return   # 群里的闲聊，不理会
+        if not await self._check_access(update):
+            return
+        if keywords is None:
             await update.effective_message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
+        else:
+            await self.handle_request(update, keywords)
 
     async def on_music_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.handle_request(update, ' '.join(context.args).strip())
+        if await self._check_access(update):
+            await self.handle_request(update, ' '.join(context.args).strip())
 
     async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.effective_message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
+        if await self._check_access(update):
+            await update.effective_message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
 
     async def on_choice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        if not await self._check_access(update):
+            return
         action, music_id, owner_id = query.data.split(':')
         if query.from_user.id != int(owner_id):
             await query.answer('这不是你点的歌哦，自己发「我想听xxx」吧', show_alert=True)
@@ -237,11 +266,18 @@ class MusicBot:
 def build_application(settings: Settings) -> Application:
     netease = NeteaseClient(proxy=settings.netease_proxy)
     cache = FileIdCache(settings.cache_db)
-    bot = MusicBot(netease, cache, settings.max_downloads)
+    bot = MusicBot(netease, cache, settings.access, settings.max_downloads)
 
     async def post_init(app: Application):
         await app.bot.set_my_commands([('music', '搜索并下载歌曲，例如 /music 晴天'),
                                        ('help', '使用说明')])
+        access = settings.access
+        if access.public:
+            logger.info('访问模式：公开，所有人可用')
+        else:
+            logger.info('访问模式：私有，白名单用户 %d 个、群 %d 个', len(access.users), len(access.chats))
+            if not access.users and not access.chats:
+                logger.warning('白名单为空，没有人能使用 bot。私聊 bot 获取你的用户 ID，填入 ALLOWED_USERS')
         await netease.check_connectivity()
 
     async def post_shutdown(app: Application):

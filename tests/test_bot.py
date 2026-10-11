@@ -7,6 +7,7 @@ from telegram.constants import ChatType
 
 from musicbox.bot import MusicBot, build_choices, extract_keywords
 from musicbox.cache import FileIdCache
+from musicbox.config import Access
 from musicbox.netease import DownloadError, Music
 
 BOT = 'kba977_musicbox_bot'
@@ -46,9 +47,9 @@ class FakeNetease:
 class FakeMessage:
     """记录所有 Telegram 调用的假消息对象"""
 
-    def __init__(self, log: list, chat=ChatType.GROUP, text='', reply_to=None):
+    def __init__(self, log: list, chat=ChatType.GROUP, text='', reply_to=None, chat_id=-100):
         self.log = log
-        self.chat = NS(type=chat)
+        self.chat = NS(type=chat, id=chat_id)
         self.text = text
         self.reply_to_message = reply_to
         self.audio_upload_delay = 0.05
@@ -90,11 +91,17 @@ def netease():
 
 @pytest.fixture
 def bot(netease):
-    return MusicBot(netease, FileIdCache(':memory:'), max_downloads=2)
+    return MusicBot(netease, FileIdCache(':memory:'), Access(public=True), max_downloads=2)
 
 
 def update_for(message, user_id=42):
-    return NS(effective_message=message, effective_user=NS(id=user_id), effective_chat=message.chat)
+    return NS(effective_message=message, effective_user=NS(id=user_id, username='u'),
+              effective_chat=message.chat, callback_query=None)
+
+
+def choice_update(query):
+    return NS(callback_query=query, effective_user=NS(id=query.from_user.id, username='u'),
+              effective_chat=query.message.chat)
 
 
 def kinds(log):
@@ -155,26 +162,26 @@ async def test_choice_only_by_requester(bot):
     status = FakeMessage(log, reply_to=user_msg)
 
     query = FakeQuery('pick:1:42', 99, status)
-    await bot.on_choice(NS(callback_query=query), None)
+    await bot.on_choice(choice_update(query), None)
     assert '不是你点的歌' in query.answers[0]
     assert log == []
 
     query = FakeQuery('pick:1:42', 42, status)
-    await bot.on_choice(NS(callback_query=query), None)
+    await bot.on_choice(choice_update(query), None)
     assert kinds(log) == ['edit_text', 'edit_text', 'audio_upload', 'delete']
 
 
 async def test_choice_vip_returns_lyric(bot):
     log = []
     status = FakeMessage(log, reply_to=FakeMessage(log))
-    await bot.on_choice(NS(callback_query=FakeQuery('pick:2:42', 42, status)), None)
+    await bot.on_choice(choice_update(FakeQuery('pick:2:42', 42, status)), None)
     assert '无法下载' in log[-1][1] and '歌词' in log[-1][1]
     assert 'delete' not in kinds(log)
 
 
 async def test_choice_cancel(bot):
     log = []
-    await bot.on_choice(NS(callback_query=FakeQuery('cancel:0:42', 42, FakeMessage(log))), None)
+    await bot.on_choice(choice_update(FakeQuery('cancel:0:42', 42, FakeMessage(log))), None)
     assert kinds(log) == ['delete']
 
 
@@ -219,3 +226,67 @@ async def test_progress_only_in_private_chat(bot):
     group = FakeMessage(log)
     await bot.download_music(FakeMessage(log, reply_to=group), Music(4, 'a', 'b', '', None, 0))
     assert not any('下载中' in e[1] for e in log if e[0] == 'edit_text')
+
+
+# ---------- 访问控制 ----------
+
+def private_bot(netease, **access):
+    return MusicBot(netease, FileIdCache(':memory:'), Access(**access))
+
+
+def text_update(log, text, chat=ChatType.PRIVATE, user_id=42, chat_id=None):
+    chat_id = chat_id if chat_id is not None else (user_id if chat == ChatType.PRIVATE else -100)
+    return update_for(FakeMessage(log, chat=chat, text=text, chat_id=chat_id), user_id)
+
+
+async def on_text(bot, update):
+    await bot.on_text(update, NS(bot=NS(username=BOT)))
+
+
+async def test_private_bot_denies_stranger_with_id(netease):
+    log = []
+    await on_text(private_bot(netease), text_update(log, '我想听晴天', user_id=7))
+    assert len(log) == 1 and '私人 bot' in log[0][1] and '<code>7</code>' in log[0][1]
+
+
+async def test_private_bot_denies_stranger_help(netease):
+    log = []
+    await private_bot(netease).on_help(text_update(log, '/start', user_id=7), None)
+    assert '私人 bot' in log[0][1]
+
+
+async def test_private_bot_ignores_group_chatter(netease):
+    log = []
+    await on_text(private_bot(netease), text_update(log, '大家好', chat=ChatType.GROUP))
+    assert log == []
+
+
+async def test_private_bot_denies_group_with_chat_id(netease):
+    log = []
+    update = text_update(log, '我想听晴天', chat=ChatType.SUPERGROUP, chat_id=-1009)
+    await on_text(private_bot(netease), update)
+    assert '本群未开通' in log[0][1] and '-1009' in log[0][1]
+
+
+async def test_whitelisted_user_allowed_everywhere(netease):
+    bot = private_bot(netease, users=frozenset({42}))
+    for chat in (ChatType.PRIVATE, ChatType.GROUP):
+        log = []
+        await on_text(bot, text_update(log, '我想听晴天', chat=chat))
+        assert kinds(log) == ['reply_text', 'edit_text'] and '搜索中' in log[0][1]
+
+
+async def test_whitelisted_chat_allows_all_members(netease):
+    bot = private_bot(netease, chats=frozenset({-1009}))
+    log = []
+    await on_text(bot, text_update(log, '我想听晴天', chat=ChatType.SUPERGROUP, user_id=7, chat_id=-1009))
+    assert '搜索中' in log[0][1]
+
+
+async def test_private_bot_denies_callback(netease):
+    log = []
+    query = FakeQuery('pick:1:7', 7, FakeMessage(log))
+    update = NS(callback_query=query, effective_user=NS(id=7, username='u'),
+                effective_chat=NS(type=ChatType.GROUP, id=-100))
+    await private_bot(netease).on_choice(update, None)
+    assert '没有使用权限' in query.answers[0] and log == []
