@@ -103,6 +103,7 @@ class MusicBot:
             return True
 
         lyric_task = asyncio.create_task(self.netease.get_lyric(music.id))
+        thumb_task = asyncio.create_task(self.netease.get_thumb(music.thumb))
         try:
             async with self.download_slots:
                 url = await self.netease.resolve_download_url(music)
@@ -113,6 +114,7 @@ class MusicBot:
                 audio = await self.netease.download(url, MAX_AUDIO_SIZE, on_progress)
         except DownloadError as e:
             text = f'<i>{html.escape(str(e))}</i>\n\n{html.escape(music.title)}'
+            thumb_task.cancel()
             lyric = await lyric_task
             if lyric:
                 text += '\n\n' + html.escape(lyric)
@@ -120,7 +122,7 @@ class MusicBot:
             return False
 
         await status.edit_text(f'{html.escape(music.title)}, 发送中....', parse_mode=ParseMode.HTML)
-        thumb, lyric = await asyncio.gather(self.netease.get_thumb(music.thumb), lyric_task)
+        thumb, lyric = await asyncio.gather(thumb_task, lyric_task)
         sent = await message.reply_audio(audio=InputFile(audio, filename=f'{music.name}.mp3'),
                                          title=music.name,
                                          performer=music.author,

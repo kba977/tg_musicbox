@@ -16,6 +16,7 @@ HEADERS = {
     'Referer': 'https://music.163.com/',
 }
 VIP_FEES = (1, 4)  # 1: VIP 歌曲, 4: 付费专辑，基本都无法下载
+THUMB_TIMEOUT = 5  # 封面只是锦上添花，拿不到就不等了
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
@@ -121,7 +122,8 @@ class NeteaseClient:
         if not url:
             return None
         try:
-            resp = await self._http.get(url, params={'param': '320y320'}, follow_redirects=True)
+            resp = await self._http.get(url, params={'param': '320y320'}, follow_redirects=True,
+                                        timeout=THUMB_TIMEOUT)
             resp.raise_for_status()
             return resp.content
         except httpx.HTTPError:
