@@ -51,7 +51,7 @@ docker compose up -d --build
 docker compose logs -f      # 看到「网易云连通性检查通过」即可
 ```
 
-更新：`git pull && docker compose up -d --build`
+更新：`git pull && docker compose up -d --build --force-recreate`
 
 > 网易云对海外 IP 有地区限制。如果日志提示「当前 IP 可能被限制地区」，在 `.env` 里配置 `NETEASE_PROXY` 指向一个香港或国内的代理。
 >
