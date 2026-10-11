@@ -1,3 +1,5 @@
+<img src="./images/avatar.png" width="96" align="right" alt="音乐盒子">
+
 # Telegram 音乐盒子
 
 在 Telegram 上搜索并下载网易云音乐。
